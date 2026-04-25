@@ -333,11 +333,7 @@ def build_app():
 
     def _img(key): return plots[key] if Path(plots[key]).exists() else None
 
-    with gr.Blocks(
-        title="🪞 ECHO ULTIMATE",
-        theme=gr.themes.Soft(),
-        css=".gradio-container { background: #0d0d18 !important; }",
-    ) as demo:
+    with gr.Blocks(title="🪞 ECHO ULTIMATE") as demo:
         gr.Markdown(
             "# 🪞 ECHO ULTIMATE — Training LLMs to Know What They Don't Know\n"
             "> *The most dangerous AI isn't one that's wrong — it's one that's wrong **and certain**.*\n\n"
@@ -486,7 +482,9 @@ def main():
     logging.basicConfig(level=logging.INFO)
     demo = build_app()
     demo.launch(server_name="0.0.0.0", server_port=cfg.GRADIO_PORT,
-                share=False, show_error=True)
+                share=False, show_error=True,
+                theme=gr.themes.Soft(),
+                css=".gradio-container { background: #0d0d18 !important; }")
 
 
 if __name__ == "__main__":

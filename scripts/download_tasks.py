@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--quiet", action="store_true")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
     if not args.quiet:
         print("📥  Downloading ECHO ULTIMATE task datasets (7 domains)…")
     from env.task_bank import TaskBank

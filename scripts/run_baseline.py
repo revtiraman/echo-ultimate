@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true", help="Fewer episodes for CI")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     print("🎯  Running baseline evaluation…")
     from config import cfg
