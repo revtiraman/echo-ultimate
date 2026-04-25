@@ -81,7 +81,7 @@ calibration_metrics:
   resolution: "How much predictions differ from base rate — informativeness"
 
 api:
-  base_url: "https://revti126-echo-ultimate.hf.space"
+  base_url: "https://vikaspandey582003-echo-ultimate.hf.space"
   endpoints:
     health:     "GET  /health"
     tasks:      "GET  /tasks"
@@ -96,7 +96,7 @@ api:
 
 training:
   algorithm: "GRPO (Group Relative Policy Optimization)"
-  model: "Qwen/Qwen2.5-3B-Instruct"
+  model: "unsloth/Qwen2.5-7B-Instruct"
   total_steps: 5800
   phases: 3
   framework: "HuggingFace TRL ≥ 0.9.0"
@@ -106,5 +106,5 @@ citation: |
     title  = {ECHO ULTIMATE: Training LLMs to Know What They Don't Know},
     author = {Tripathi, Revtiraman and Pandey, Vikas Dev},
     year   = {2025},
-    url    = {https://huggingface.co/spaces/revti126/echo-ultimate}
+    url    = {https://huggingface.co/spaces/Vikaspandey582003/echo-ultimate}
   }

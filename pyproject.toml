@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-echo"
+version = "0.1.0"
+description = "ECHO: Epistemic Calibration via Hierarchical OpenEnv"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "torch",
+    "transformers",
+    "datasets",
+    "gymnasium",
+    "trl>=0.8.0",
+    "peft",
+    "huggingface_hub",
+    "gradio>=4.0.0",
+    "plotly",
+    "pandas",
+    "numpy",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["env*", "server*", "core*", "training*", "ui*"]
