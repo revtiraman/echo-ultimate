@@ -1,4 +1,4 @@
-"""HuggingFace Space entry point — delegates to ui/app.py."""
+"""HuggingFace Space entry point."""
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -6,10 +6,16 @@ import gradio as gr
 from ui.app import build_app
 
 demo = build_app()
+from ui.app import _CSS
+
 demo.queue()
 demo.launch(
     server_name=os.getenv("GRADIO_SERVER_NAME", "0.0.0.0"),
     server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
-    theme=gr.themes.Soft(),
-    css=".gradio-container { background: #0d0d18 !important; }",
+    css=_CSS,
+    theme=gr.themes.Base(
+        primary_hue=gr.themes.colors.blue,
+        neutral_hue=gr.themes.colors.slate,
+        font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
+    ),
 )
