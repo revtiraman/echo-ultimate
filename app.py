@@ -1,15 +1,12 @@
-"""HuggingFace Space entry point."""
-import sys, os
+"""HuggingFace Space entry point — forwards to FastAPI+Gradio server."""
+import sys
+import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ui.app import build_app, _CSS, _JS
+# This file is kept for compatibility.
+# The actual app is in server/app.py and launched via Dockerfile CMD:
+#   python -m uvicorn server.app:app --host 0.0.0.0 --port 7860
+# All endpoints:
+#   /health  /tasks  /reset  /step  /state  /metrics  /fingerprint  /history  /docs  /ui
 
-demo, theme = build_app()
-demo.queue()
-demo.launch(
-    server_name=os.getenv("GRADIO_SERVER_NAME", "0.0.0.0"),
-    server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
-    css=_CSS,
-    js=_JS,
-    theme=theme,
-)
+from server.app import app  # noqa: F401 — imported so this module is a valid ASGI target
