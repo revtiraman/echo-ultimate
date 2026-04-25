@@ -1,5 +1,5 @@
 """
-Publish ECHO ULTIMATE as a HuggingFace Space (Gradio SDK).
+Publish ECHO ULTIMATE as a HuggingFace Space (Docker SDK, Python 3.11).
 
 Usage:
   python scripts/publish_space.py --token YOUR_HF_TOKEN
@@ -21,9 +21,7 @@ title: ECHO ULTIMATE
 emoji: 🧠
 colorFrom: blue
 colorTo: purple
-sdk: gradio
-sdk_version: 4.44.0
-app_file: app.py
+sdk: docker
 pinned: true
 license: apache-2.0
 ---
@@ -60,7 +58,7 @@ pairing every answer with a calibrated probability estimate.
 
 ## EchoBench Dataset
 
-The 7-domain benchmark used for training: [Vikaspandey582003/echobench](https://huggingface.co/datasets/Vikaspandey582003/echobench)
+The 7-domain benchmark: [Vikaspandey582003/echobench](https://huggingface.co/datasets/Vikaspandey582003/echobench)
 
 | Domain | Source |
 |--------|--------|
@@ -85,10 +83,38 @@ The 7-domain benchmark used for training: [Vikaspandey582003/echobench](https://
 ```
 """
 
+# Dockerfile written into the Space — uses Python 3.11 to avoid audioop/pydub issue
+_SPACE_DOCKERFILE = """\
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    build-essential curl git && \\
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN mkdir -p data results/plots
+
+# Pre-generate all plots so Gradio loads instantly (falls back silently on failure)
+RUN python scripts/generate_plots.py || echo "Plot pre-generation skipped"
+
+EXPOSE 7860
+
+ENV GRADIO_SERVER_NAME=0.0.0.0
+ENV GRADIO_SERVER_PORT=7860
+
+CMD ["python", "app.py"]
+"""
+
 _IGNORE = {
     "__pycache__", ".git", ".gitignore", "data", "results",
     "echo_lora_adapter", "adversarial_questions.json",
-    ".env", "*.pyc", "node_modules", ".DS_Store",
+    ".env", "node_modules", ".DS_Store",
 }
 
 
@@ -99,8 +125,8 @@ def _should_skip(p: Path) -> bool:
     return p.suffix == ".pyc"
 
 
-def build_space_dir(src: Path, dst: Path, token: str):
-    """Copy project into dst, inject Space README and requirements."""
+def build_space_dir(src: Path, dst: Path):
+    """Copy project into dst, inject Space README, Dockerfile, and requirements."""
     dst.mkdir(parents=True, exist_ok=True)
 
     for item in src.rglob("*"):
@@ -114,10 +140,11 @@ def build_space_dir(src: Path, dst: Path, token: str):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item, target)
 
-    # Space README (overrides project README)
+    # Inject Space-specific files (override project versions)
     (dst / "README.md").write_text(_SPACE_README, encoding="utf-8")
+    (dst / "Dockerfile").write_text(_SPACE_DOCKERFILE, encoding="utf-8")
 
-    # Use lighter Space requirements
+    # Use the lighter space_requirements.txt as requirements.txt
     space_req = src / "space_requirements.txt"
     if space_req.exists():
         shutil.copy2(space_req, dst / "requirements.txt")
@@ -131,12 +158,12 @@ def publish(repo_id: str, token: str, src: Path):
 
     api = HfApi(token=token)
 
-    print(f"Creating Space: {repo_id}")
+    print(f"Creating Space: {repo_id} (Docker SDK)")
     try:
         api.create_repo(
             repo_id=repo_id,
             repo_type="space",
-            space_sdk="gradio",
+            space_sdk="docker",
             exist_ok=True,
             private=False,
         )
@@ -145,7 +172,7 @@ def publish(repo_id: str, token: str, src: Path):
         print(f"  Note: {exc}")
 
     with tempfile.TemporaryDirectory() as tmp:
-        space_dir = build_space_dir(src, Path(tmp) / "space", token)
+        space_dir = build_space_dir(src, Path(tmp) / "space")
 
         print("Uploading files to Space…")
         api.upload_folder(
@@ -157,7 +184,7 @@ def publish(repo_id: str, token: str, src: Path):
 
     url = f"https://huggingface.co/spaces/{repo_id}"
     print(f"\n✅  Space published: {url}")
-    print("    (Building may take 2–5 minutes on HuggingFace.)")
+    print("    Docker build takes ~5-10 minutes on HuggingFace.")
     return url
 
 
@@ -166,7 +193,7 @@ def main():
     parser.add_argument("--token", required=True, help="HuggingFace API write token")
     parser.add_argument("--repo", default="Vikaspandey582003/echo-ultimate",
                         help="Space repo ID (default: Vikaspandey582003/echo-ultimate)")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     src = Path(__file__).parent.parent.resolve()
     publish(args.repo, args.token, src)
