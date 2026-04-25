@@ -271,6 +271,27 @@ def train(
         except Exception as exc:
             logger.error("Phase 4 skipped: %s", exc)
 
+    # Auto-push adapter to HF Hub
+    hf_token = os.environ.get("HF_TOKEN", "")
+    adapter_repo = os.environ.get("ADAPTER_REPO", "Vikaspandey582003/echo-calibration-adapter")
+    if hf_token:
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi(token=hf_token)
+            api.create_repo(adapter_repo, repo_type="model", exist_ok=True, token=hf_token)
+            api.upload_folder(
+                folder_path=lora_path,
+                repo_id=adapter_repo,
+                repo_type="model",
+                commit_message="ECHO GRPO-trained calibration adapter — HF Space GPU training",
+                token=hf_token,
+            )
+            print(f"✅  Adapter pushed to https://huggingface.co/{adapter_repo}")
+        except Exception as exc:
+            logger.error("HF Hub push failed: %s", exc)
+    else:
+        print("⚠️  HF_TOKEN not set — adapter not pushed to Hub. Set HF_TOKEN env var.")
+
     print(f"\n✅  Training complete. Model saved to {output_dir}")
 
 

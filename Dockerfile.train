@@ -1,0 +1,39 @@
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    python3.10 python3.10-dev python3-pip git curl build-essential && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf python3.10 /usr/bin/python && \
+    ln -sf python3.10 /usr/bin/python3
+
+# Training deps (with CUDA support)
+RUN pip install --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir \
+    torch==2.2.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+RUN pip install --no-cache-dir \
+    "trl>=0.9.0" \
+    "transformers>=4.44.0" \
+    "peft>=0.10.0" \
+    "accelerate>=0.28.0" \
+    "bitsandbytes>=0.42.0" \
+    "datasets>=2.18.0" \
+    "huggingface-hub>=0.21.0" \
+    numpy pandas scipy scikit-learn \
+    PyYAML rich python-dotenv wandb
+RUN pip install --no-cache-dir \
+    "unsloth[cu121-ampere-torch220] @ git+https://github.com/unslothai/unsloth.git" \
+    || pip install --no-cache-dir \
+    "unsloth @ git+https://github.com/unslothai/unsloth.git"
+
+COPY . .
+RUN mkdir -p data results/plots echo_lora_adapter
+
+EXPOSE 7860
+
+CMD ["python", "train_entrypoint.py"]
