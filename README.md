@@ -1,12 +1,11 @@
 ---
-title: "🪞 ECHO ULTIMATE — Training LLMs to Know What They Don't Know"
-emoji: 🪞
-colorFrom: green
+title: Echo Ultimate
+emoji: 🧠
+colorFrom: blue
 colorTo: purple
 sdk: docker
 app_port: 7860
-pinned: true
-tags: [openenv, calibration, metacognition, rl, anti-hallucination, grpo]
+pinned: false
 ---
 
 # 🪞 ECHO ULTIMATE — Training LLMs to Know What They Don't Know

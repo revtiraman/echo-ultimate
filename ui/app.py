@@ -840,10 +840,11 @@ def build_app():
     return demo, theme
 
 
+demo, theme = build_app()
+
+
 def main():
-    import gradio as gr
     logging.basicConfig(level=logging.INFO)
-    demo, theme = build_app()
     demo.launch(
         server_name="0.0.0.0",
         server_port=cfg.GRADIO_PORT,
