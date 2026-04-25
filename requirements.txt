@@ -1,42 +1,40 @@
-# Core ML
-torch>=2.1.0
-transformers>=4.44.0
-trl>=0.9.0
-datasets>=2.18.0
-accelerate>=0.28.0
-peft>=0.10.0
-bitsandbytes>=0.42.0
-
-# Unsloth — 2-3x faster training, 70% less VRAM (install first on GPU machines)
-unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
-
-# Optional: GPT-4o-mini baseline comparison
-openai>=1.0.0
-
-# Environment
-gymnasium>=1.0.0
-numpy>=1.26.0
-pandas>=2.1.0
-scipy>=1.11.0
-
-# Server
+# Server (required for Space)
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 pydantic>=2.6.0
 httpx>=0.27.0
 
-# Demo
+# UI
 gradio>=4.20.0
+
+# ML inference (lightweight — no training on Space)
+torch>=2.1.0
+transformers>=4.44.0
+datasets>=2.18.0
+accelerate>=0.28.0
+peft>=0.10.0
+
+# Environment / calibration
+gymnasium>=1.0.0
+numpy>=1.26.0
+pandas>=2.1.0
+scipy>=1.11.0
+scikit-learn>=1.4.0
 
 # Visualization
 matplotlib>=3.8.0
 seaborn>=0.13.0
+plotly>=5.0.0
 
 # Utilities
-wandb>=0.16.0
 huggingface-hub>=0.21.0
-scikit-learn>=1.4.0
 python-dotenv>=1.0.0
-click>=8.1.0
-rich>=13.0.0
 PyYAML>=6.0.0
+rich>=13.0.0
+
+# Optional — only needed for training (Colab/GPU), not for Space server
+# trl>=0.9.0
+# bitsandbytes>=0.42.0
+# unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
+# openai>=1.0.0
+# wandb>=0.16.0
