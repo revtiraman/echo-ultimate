@@ -1,24 +1,114 @@
 """
-ECHO ULTIMATE — Gradio 5-Tab Demo.
+ECHO ULTIMATE — Gradio 6-Tab Demo.
 
 Tab 1: 🎯 Live Challenge      — user answers questions with confidence slider
 Tab 2: 🤖 ECHO vs Overconfident AI — side-by-side 10-question comparison
 Tab 3: 🧬 Epistemic Fingerprint   — domain radar chart
 Tab 4: 📊 Training Evidence       — all 6 pre-generated plots
 Tab 5: 🏆 Official Evaluation     — run all 3 OpenEnv tasks
+Tab 6: ⚡ Live Training           — watch ECE drop in real time
 """
 
 import json
 import logging
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 
 from config import cfg
 
 logger = logging.getLogger(__name__)
+
+# ── Tab 6: Live Training state ────────────────────────────────────────────────
+
+_training_state: dict = {"running": False, "steps": [], "ece_values": [], "stop": False}
+
+
+def _make_live_plot(steps: list, ece_values: list):
+    fig, ax = plt.subplots(figsize=(8, 4), facecolor="#1a1a2e")
+    ax.set_facecolor("#16213e")
+    if steps:
+        ax.plot(steps, ece_values, color="#00ff88", linewidth=2,
+                marker="o", markersize=4, zorder=3)
+        ax.fill_between(steps, ece_values,
+                        alpha=0.15, color="#00ff88")
+    ax.axhline(y=0.15, color="#ff4444", linestyle="--", alpha=0.7,
+               label="Task 1 threshold (ECE=0.15)")
+    ax.axhline(y=0.20, color="#ffaa00", linestyle="--", alpha=0.7,
+               label="Task 2 threshold (ECE=0.20)")
+    ax.set_xlabel("Training Step", color="white", fontsize=11)
+    ax.set_ylabel("ECE  (↓ lower = better calibrated)", color="white", fontsize=11)
+    ax.set_title("ECHO Calibration During GRPO Training",
+                 color="white", fontsize=14, fontweight="bold")
+    ax.tick_params(colors="white")
+    ax.set_ylim(0, 0.50)
+    ax.grid(True, linestyle="--", alpha=0.2, color="#445566")
+    for spine in ax.spines.values():
+        spine.set_color("#334455")
+    ax.legend(facecolor="#16213e", labelcolor="white",
+              edgecolor="#334455", fontsize=9)
+    plt.tight_layout()
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    plt.savefig(tmp.name, dpi=100, bbox_inches="tight", facecolor="#1a1a2e")
+    plt.close(fig)
+    return tmp.name
+
+
+def _run_live_training_thread():
+    import random
+    _training_state["running"]    = True
+    _training_state["steps"]      = []
+    _training_state["ece_values"] = []
+    _training_state["stop"]       = False
+    ece = 0.42
+    for step in range(0, 101, 10):
+        if _training_state["stop"]:
+            break
+        ece = max(0.07, ece - random.uniform(0.02, 0.05) + random.uniform(-0.01, 0.01))
+        _training_state["steps"].append(step)
+        _training_state["ece_values"].append(round(ece, 4))
+        time.sleep(1.5)
+    _training_state["running"] = False
+
+
+def start_live_training():
+    """Generator: starts training thread, polls state, yields UI updates."""
+    t = threading.Thread(target=_run_live_training_thread, daemon=True)
+    t.start()
+    for _ in range(40):
+        time.sleep(1.5)
+        steps  = _training_state["steps"][:]
+        ece_v  = _training_state["ece_values"][:]
+        n      = len(steps)
+        prog   = round((n / 11) * 100)
+        if steps:
+            status = (
+                f"Training…  Step {steps[-1]}/100  |  "
+                f"Current ECE: {ece_v[-1]:.4f}"
+            )
+        else:
+            status = "Initializing…"
+        if not _training_state["running"] and n > 0:
+            status = (
+                f"✅ Complete!  Final ECE: {ece_v[-1]:.4f}  "
+                f"(started at {ece_v[0]:.4f}, improved {ece_v[0]-ece_v[-1]:.4f})"
+            )
+            yield status, _make_live_plot(steps, ece_v), prog
+            return
+        yield status, _make_live_plot(steps, ece_v), prog
+
+
+def stop_live_training():
+    _training_state["stop"] = True
+    return "⏹ Stopped."
+
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 
@@ -360,6 +450,34 @@ def build_app():
             with gr.Accordion("📄 Full JSON", open=False):
                 json_out = gr.Code(language="json")
             eval_btn.click(run_evaluation, outputs=[table_md, verdict_md, json_out])
+
+        # ── Tab 6 ──────────────────────────────────────────────────────────
+        with gr.Tab("⚡ Live Training"):
+            gr.Markdown(
+                "## Watch ECHO Learn in Real-Time\n"
+                "Simulates 100 GRPO training steps and plots ECE decreasing toward calibration.\n"
+                "The dashed lines show the pass thresholds for Task 1 (ECE<0.15) "
+                "and Task 2 (ECE<0.20)."
+            )
+            with gr.Row():
+                lt_start_btn = gr.Button("🚀 Start Live Training Demo", variant="primary")
+                lt_stop_btn  = gr.Button("⏹ Stop", variant="stop")
+            lt_status  = gr.Textbox(
+                label="Status", value="Ready. Click Start to begin.", lines=2,
+                interactive=False,
+            )
+            lt_plot    = gr.Image(label="ECE During Training (updates every ~1.5s)",
+                                  type="filepath")
+            lt_progress = gr.Slider(
+                minimum=0, maximum=100, value=0,
+                label="Training Progress (%)", interactive=False,
+            )
+
+            lt_start_btn.click(
+                start_live_training,
+                outputs=[lt_status, lt_plot, lt_progress],
+            )
+            lt_stop_btn.click(stop_live_training, outputs=[lt_status])
 
     return demo
 

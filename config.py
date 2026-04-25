@@ -10,7 +10,7 @@ from typing import Dict, List
 @dataclass
 class EchoConfig:
     # ── Model ──────────────────────────────────────────────────
-    MODEL_NAME: str = "Qwen/Qwen2.5-3B-Instruct"
+    MODEL_NAME: str = "unsloth/Qwen2.5-7B-Instruct"
 
     # ── Domains ────────────────────────────────────────────────
     DOMAINS: List[str] = field(default_factory=lambda: [
@@ -51,6 +51,7 @@ class EchoConfig:
     PHASE_3_MIX: Dict[str, float] = field(default_factory=lambda: {"easy": 0.2, "medium": 0.4, "hard": 0.4})
     PHASE_ADVANCE_ECE_THRESHOLD: float = 0.20
     MIN_STEPS_PER_PHASE: int = 200
+    ENABLE_PHASE_4: bool = True
 
     # ── GRPO Training ──────────────────────────────────────────
     LEARNING_RATE: float = 5e-6

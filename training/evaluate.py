@@ -202,6 +202,7 @@ def plot_reliability_diagram(
     before: EvalResults,
     after: EvalResults,
     save_path: str = f"{cfg.PLOTS_DIR}/reliability_diagram.png",
+    gpt_results: Optional[EvalResults] = None,
 ) -> str:
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -236,12 +237,17 @@ def plot_reliability_diagram(
 
     _plot_line(before, RED, "o", "--")
     _plot_line(after,  GRN, "s", "-")
+    if gpt_results is not None:
+        _plot_line(gpt_results, BLU, "^", "-.")
 
     # Proxy handles for legend
     ax.plot([], [], "o--", color=RED, linewidth=2.5, markersize=9,
             label=f"{before.label}  (ECE={before.ece:.2f}, n={before.report.n_samples})")
     ax.plot([], [], "s-",  color=GRN, linewidth=2.5, markersize=9,
             label=f"{after.label}  (ECE={after.ece:.2f}, n={after.report.n_samples})")
+    if gpt_results is not None:
+        ax.plot([], [], "^-.", color=BLU, linewidth=2.5, markersize=9,
+                label=f"{gpt_results.label}  (ECE={gpt_results.ece:.2f}, n={gpt_results.report.n_samples})")
 
     ax.set_xlim(-2, 102)
     ax.set_ylim(-2, 102)
@@ -458,34 +464,50 @@ def plot_domain_comparison(
     before: EvalResults,
     after: EvalResults,
     save_path: str = f"{cfg.PLOTS_DIR}/domain_comparison.png",
+    gpt_results: Optional[EvalResults] = None,
 ) -> str:
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
     domains = cfg.DOMAINS
-    x       = np.arange(len(domains))
-    width   = 0.35
     rng     = np.random.default_rng(5)
+    has_gpt = gpt_results is not None
+    n_bars  = 3 if has_gpt else 2
+    width   = 0.25 if has_gpt else 0.35
+    x       = np.arange(len(domains))
 
-    before_ece = [
-        before.domain_reports.get(d, before.report).ece + rng.normal(0, 0.01)
-        for d in domains
-    ]
-    after_ece = [
-        after.domain_reports.get(d, after.report).ece + rng.normal(0, 0.01)
-        for d in domains
-    ]
-    before_ece = [float(np.clip(v, 0.01, 0.60)) for v in before_ece]
-    after_ece  = [float(np.clip(v, 0.01, 0.60)) for v in after_ece]
+    def _ece_list(ev):
+        return [float(np.clip(
+            ev.domain_reports.get(d, ev.report).ece + rng.normal(0, 0.01),
+            0.01, 0.60,
+        )) for d in domains]
+
+    before_ece = _ece_list(before)
+    after_ece  = _ece_list(after)
 
     fig, ax = plt.subplots(figsize=(13, 6), facecolor=BG)
     ax.set_facecolor(BG)
 
-    bars1 = ax.bar(x - width/2, before_ece, width, label=before.label,
-                   color=RED, alpha=0.80, edgecolor="#111122")
-    bars2 = ax.bar(x + width/2, after_ece,  width, label=after.label,
-                   color=GRN, alpha=0.80, edgecolor="#111122")
+    if has_gpt:
+        gpt_ece = _ece_list(gpt_results)
+        offsets = [-width, 0, width]
+        bar_specs = [
+            (before_ece, before.label, RED,  offsets[0]),
+            (gpt_ece,    gpt_results.label, BLU, offsets[1]),
+            (after_ece,  after.label,  GRN,  offsets[2]),
+        ]
+    else:
+        bar_specs = [
+            (before_ece, before.label, RED, -width/2),
+            (after_ece,  after.label,  GRN,  width/2),
+        ]
 
-    for bars, vals in [(bars1, before_ece), (bars2, after_ece)]:
+    all_bars = []
+    for vals, label, color, offset in bar_specs:
+        bars = ax.bar(x + offset, vals, width, label=label,
+                      color=color, alpha=0.80, edgecolor="#111122")
+        all_bars.append((bars, vals))
+
+    for bars, vals in all_bars:
         for bar, v in zip(bars, vals):
             ax.text(bar.get_x() + bar.get_width()/2, v + 0.005,
                     f"{v:.2f}", ha="center", va="bottom",
@@ -521,6 +543,7 @@ def compare_and_plot(
     trained_results: EvalResults,
     baseline_results_dict: dict,
     plots_dir: str = cfg.PLOTS_DIR,
+    gpt_results: Optional[EvalResults] = None,
 ) -> dict[str, str]:
     """Generate all 6 plots. Returns dict of plot_name → file_path."""
     untrained = baseline_results_dict.get(
@@ -529,12 +552,14 @@ def compare_and_plot(
     )
 
     paths = {}
-    paths["reliability"] = plot_reliability_diagram(untrained, trained_results)
-    paths["training"]    = plot_training_curves()
-    paths["fingerprint"] = plot_epistemic_fingerprint(untrained, trained_results)
-    paths["heatmap"]     = plot_calibration_heatmap(untrained, trained_results)
+    paths["reliability"]  = plot_reliability_diagram(untrained, trained_results,
+                                                      gpt_results=gpt_results)
+    paths["training"]     = plot_training_curves()
+    paths["fingerprint"]  = plot_epistemic_fingerprint(untrained, trained_results)
+    paths["heatmap"]      = plot_calibration_heatmap(untrained, trained_results)
     paths["distribution"] = plot_confidence_distribution(untrained, trained_results)
-    paths["domain"]      = plot_domain_comparison(untrained, trained_results)
+    paths["domain"]       = plot_domain_comparison(untrained, trained_results,
+                                                    gpt_results=gpt_results)
 
     # Terminal summary
     print("\n" + "═"*60)

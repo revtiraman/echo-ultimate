@@ -1,6 +1,7 @@
 """
 ECHO ULTIMATE — GRPO Training Loop.
 Uses HuggingFace TRL GRPOTrainer with 3-phase curriculum.
+Supports Unsloth for 2-3x faster training with 70% less VRAM when available.
 """
 
 import csv
@@ -12,6 +13,18 @@ from typing import Optional
 import numpy as np
 
 from config import cfg
+
+# ── Unsloth optional import ───────────────────────────────────────────────────
+try:
+    from unsloth import FastLanguageModel
+    UNSLOTH_AVAILABLE = True
+    logging.getLogger(__name__).info("Unsloth available — using 4-bit LoRA training")
+except ImportError:
+    UNSLOTH_AVAILABLE = False
+    logging.getLogger(__name__).warning(
+        "Unsloth not available — falling back to standard transformers. "
+        "Install with: pip install 'unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git'"
+    )
 from env.parser import parse_response
 from env.reward import (
     accuracy_reward, brier_reward,
@@ -120,16 +133,38 @@ def train(
 
     # Model + tokenizer
     logger.info("Loading model %s …", model_name)
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        trust_remote_code=True,
-    )
+    if UNSLOTH_AVAILABLE:
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=model_name,
+            max_seq_length=512,
+            dtype=None,
+            load_in_4bit=True,
+        )
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=16,
+            target_modules=["q_proj","k_proj","v_proj","o_proj",
+                            "gate_proj","up_proj","down_proj"],
+            lora_alpha=16,
+            lora_dropout=0,
+            bias="none",
+            use_gradient_checkpointing="unsloth",
+            random_state=42,
+        )
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        logger.info("Unsloth: 4-bit model + LoRA adapter ready (2-3x faster, 70%% less VRAM)")
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+        logger.info("Standard transformers model loaded (full precision)")
 
     curriculum  = CurriculumManager()
     reward_fn   = build_reward_function(task_bank)
@@ -221,4 +256,49 @@ def train(
 
     trainer.save_model(output_dir)
     tokenizer.save_pretrained(output_dir)
+
+    # Save LoRA adapter separately for lightweight inference loading
+    lora_path = "echo_lora_adapter"
+    model.save_pretrained(lora_path)
+    tokenizer.save_pretrained(lora_path)
+    print(f"LoRA adapter saved to {lora_path}/")
+
+    # Phase 4: adversarial self-play (targets weakest domains)
+    if cfg.ENABLE_PHASE_4:
+        try:
+            from training.adversarial import run_phase_4
+            run_phase_4(trainer, model, tokenizer, None, cfg)
+        except Exception as exc:
+            logger.error("Phase 4 skipped: %s", exc)
+
     print(f"\n✅  Training complete. Model saved to {output_dir}")
+
+
+# ── Inference loader ──────────────────────────────────────────────────────────
+
+def load_trained_model(adapter_path: str = "echo_lora_adapter"):
+    """
+    Load base model + LoRA adapter for inference.
+    Uses Unsloth if available for fastest generation; falls back to transformers.
+    """
+    if UNSLOTH_AVAILABLE:
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            adapter_path, load_in_4bit=True
+        )
+        FastLanguageModel.for_inference(model)
+        logger.info("Unsloth inference model loaded from %s", adapter_path)
+    else:
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(adapter_path)
+            model = AutoModelForCausalLM.from_pretrained(
+                adapter_path,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+            )
+            model.eval()
+            logger.info("Standard inference model loaded from %s", adapter_path)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load model from {adapter_path}: {exc}")
+    return model, tokenizer

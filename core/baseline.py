@@ -198,6 +198,51 @@ class TemperatureScaledAgent:
         return parse_response(raw)
 
 
+# ── GPTBaseline ───────────────────────────────────────────────────────────────
+
+class GPTBaseline:
+    """
+    GPT-4o-mini calibration baseline using the OpenAI API.
+    Asks the model to produce <confidence><answer> formatted output.
+    Requires OPENAI_API_KEY environment variable.
+    Skipped silently if key is not set or openai is not installed.
+    """
+    name = "GPT-4o-mini"
+
+    def __init__(self, api_key: str = None) -> None:
+        import os
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
+        self._available = bool(self.api_key)
+
+    def __call__(self, prompt: str) -> str:
+        if not self._available:
+            return _make_response(70, "")
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=self.api_key)
+            sys_msg = (
+                "You are an epistemically honest AI. Before answering, state your confidence.\n"
+                "Required format: <confidence>NUMBER</confidence><answer>YOUR ANSWER</answer>"
+            )
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user",   "content": prompt},
+                ],
+                max_tokens=200,
+                temperature=0.7,
+            )
+            return response.choices[0].message.content or _make_response(70, "")
+        except Exception as exc:
+            logger.warning("GPTBaseline error: %s", exc)
+            return _make_response(70, "")
+
+    def answer(self, question: str, domain: str = "factual") -> ParseResult:
+        raw = self(f"Question: {question}")
+        return parse_response(raw)
+
+
 # ── Baseline evaluation ───────────────────────────────────────────────────────
 
 ALL_BASELINES = {

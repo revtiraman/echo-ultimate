@@ -124,24 +124,44 @@ def cmd_all():
     print("\n🎉  Full pipeline complete!")
 
 
+def cmd_publish_benchmark():
+    print("📦  Publishing EchoBench to HuggingFace Hub…")
+    token = input("Enter HuggingFace write token: ").strip()
+    if not token:
+        print("❌  No token provided.")
+        return
+    from scripts.publish_echobench import main as _pub_main
+    import sys as _sys
+    _sys.argv = ["publish_echobench.py", "--token", token]
+    _pub_main()
+
+
 COMMANDS = {
-    "download": cmd_download, "test": cmd_test, "baseline": cmd_baseline,
-    "plots": cmd_plots, "train": cmd_train, "eval": cmd_eval,
-    "demo": cmd_demo, "server": cmd_server, "all": cmd_all,
+    "download":          cmd_download,
+    "test":              cmd_test,
+    "baseline":          cmd_baseline,
+    "plots":             cmd_plots,
+    "train":             cmd_train,
+    "eval":              cmd_eval,
+    "demo":              cmd_demo,
+    "server":            cmd_server,
+    "all":               cmd_all,
+    "publish-benchmark": cmd_publish_benchmark,
 }
 
 HELP = """
 ECHO ULTIMATE — Metacognitive Calibration RL Environment
 
-  python run.py download    Download 7 task datasets from HuggingFace
-  python run.py test        Smoke test (no GPU, ~5 seconds)
-  python run.py baseline    Evaluate 4 baselines, generate 6 plots
-  python run.py plots       Generate all plots (synthetic data, instant)
-  python run.py train       GRPO training curriculum (GPU, 2-4h)
-  python run.py eval        Evaluate trained model, generate plots
-  python run.py demo        Gradio demo → localhost:7860
-  python run.py server      FastAPI server → localhost:8000
-  python run.py all         download + train + eval
+  python run.py download            Download 7 task datasets from HuggingFace
+  python run.py test                Smoke test (no GPU, ~5 seconds)
+  python run.py baseline            Evaluate 4 baselines, generate 6 plots
+  python run.py plots               Generate all plots (synthetic data, instant)
+  python run.py train               GRPO training curriculum (GPU, 2-4h)
+  python run.py eval                Evaluate trained model, generate plots
+  python run.py demo                Gradio demo → localhost:7860
+  python run.py server              FastAPI server → localhost:8000
+  python run.py all                 download + train + eval
+  python run.py publish-benchmark   Publish EchoBench to HuggingFace Hub
 
 Start here (no GPU needed):
   python run.py test
