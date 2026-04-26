@@ -1,14 +1,18 @@
 # ============================================================
-# ECHO Eval v3 — CELL 2: TRAINED + PLOT + UPLOAD
-# Run ONLY after restarting the kernel from Cell 1.
-# baseline_results_v3.json must exist in /kaggle/working/
+# ECHO Eval v3 — ONE SCRIPT, NO OOM
+# Strategy: load base model once → eval baseline → apply LoRA
+# adapter on top (no reload) → eval trained → plot → upload
 # ============================================================
+import os
+# ── SET YOUR TOKEN HERE ──────────────────────────────────────
+os.environ["HF_TOKEN"] = "PASTE_YOUR_HF_TOKEN_HERE"  # replace before running
+
 import subprocess
 subprocess.run(["pip", "install", "-q",
     "transformers>=4.45.0", "peft>=0.13.0", "accelerate>=0.34.0",
     "bitsandbytes>=0.42.0", "huggingface_hub>=0.24.0", "matplotlib"], check=True)
 
-import torch, json, re, os
+import torch, json, re
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -17,11 +21,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
 from huggingface_hub import HfApi, CommitOperationAdd
 
-HF_TOKEN     = os.environ.get("HF_TOKEN", "")
+HF_TOKEN     = os.environ["HF_TOKEN"]
 MODEL_NAME   = "unsloth/Qwen2.5-7B-Instruct"
 ADAPTER_REPO = "Vikaspandey582003/echo-calibration-adapter"
+OUT_DIR      = "/kaggle/working"
 
-# ── Same test questions as Cell 1 ─────────────────────────────
+# ── Test Questions (v3 — 40Q, 5 calibration failure modes) ───
 TEST_QUESTIONS = [
     # 1. PRECISION-NUMERIC (8)
     {"question": "What is the boiling point of mercury in Celsius, rounded to the nearest whole degree?",
@@ -133,8 +138,14 @@ SYSTEM_PROMPT = (
 NUMERIC_DOMAINS = {"precision_numeric", "unit_aware", "gpqa_lite"}
 
 
+def normalise_latex(text):
+    m = re.search(r'\\frac\{([^}]+)\}\{([^}]+)\}', text)
+    return f"{m.group(1)}/{m.group(2)}" if m else text
+
+
 def is_correct_numeric(pred_text, true_value, tol_pct=2.0):
-    m = re.search(r'-?\d+\.?\d*', pred_text.replace(',', ''))
+    cleaned = normalise_latex(pred_text.replace(',', ''))
+    m = re.search(r'-?\d+\.?\d*', cleaned)
     if not m:
         return False
     try:
@@ -147,19 +158,9 @@ def is_correct_numeric(pred_text, true_value, tol_pct=2.0):
         return False
 
 
-def normalise_latex_fraction(text):
-    """Convert \frac{a}{b} → a/b so substring matching works."""
-    m = re.search(r'\\frac\{([^}]+)\}\{([^}]+)\}', text)
-    if m:
-        return f"{m.group(1)}/{m.group(2)}"
-    return text
-
-
 def is_correct(pred_answer, true_answer, domain=""):
-    pred = pred_answer.lower().strip()
+    pred = normalise_latex(pred_answer.lower().strip())
     true = true_answer.lower().strip()
-    # convert LaTeX fractions before any comparison
-    pred = normalise_latex_fraction(pred)
     if domain in NUMERIC_DOMAINS:
         if is_correct_numeric(pred, true):
             return True
@@ -179,10 +180,10 @@ def parse_response(text):
     }
 
 
-def run_evaluation(model, tokenizer, questions):
+def run_evaluation(model, tokenizer, label):
     results = []
-    print(f"\nRunning TRAINED on {len(questions)} questions...\n")
-    for i, q in enumerate(questions):
+    print(f"\n{'='*55}\n  Running {label} — {len(TEST_QUESTIONS)} questions\n{'='*55}\n")
+    for i, q in enumerate(TEST_QUESTIONS):
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": q["question"]},
@@ -194,14 +195,14 @@ def run_evaluation(model, tokenizer, questions):
                                  do_sample=True, pad_token_id=tokenizer.eos_token_id)
         response = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
         parsed   = parse_response(response)
-        correct  = is_correct(parsed["answer"], q["answer"], q.get("domain",""))
+        correct  = is_correct(parsed["answer"], q["answer"], q.get("domain", ""))
         results.append({
             "question": q["question"], "true_answer": q["answer"],
             "predicted_answer": parsed["answer"], "confidence": parsed["confidence"],
-            "correct": correct, "domain": q.get("domain",""),
+            "correct": correct, "domain": q.get("domain", ""),
         })
         mark = "✓" if correct else "✗"
-        print(f"  [{i+1:3d}/{len(questions)}] {mark} conf={parsed['confidence']:3d}%  "
+        print(f"  [{i+1:2d}/40] {mark} conf={parsed['confidence']:3d}%  "
               f"pred='{parsed['answer'][:28]}'  true='{q['answer']}'")
     return results
 
@@ -224,65 +225,89 @@ def compute_metrics(results):
 
 
 def domain_breakdown(results):
-    domains = sorted(set(r["domain"] for r in results))
-    out = {}
-    for d in domains:
-        sub = [r for r in results if r["domain"] == d]
-        out[d] = compute_metrics(sub)
-    return out
+    return {d: compute_metrics([r for r in results if r["domain"] == d])
+            for d in sorted(set(r["domain"] for r in results))}
 
 
-# ── Load baseline from Cell 1 ─────────────────────────────────
-with open("/kaggle/working/baseline_results_v3.json") as f:
-    base_data = json.load(f)
-bm = base_data["metrics"]
-br = base_data["results"]
-print(f"Loaded baseline: Acc={bm['accuracy']*100:.1f}%  ECE={bm['ece']:.4f}")
-
-# ── Load + run trained ────────────────────────────────────────
-print("\nLoading trained model (4-bit + LoRA adapter)...")
+# ════════════════════════════════════════════════════════════
+# STEP 1 — Load base model ONCE (4-bit, ~5GB VRAM)
+# ════════════════════════════════════════════════════════════
+print("Loading base model in 4-bit (loads once, used for both evals)...")
 bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                          bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, token=HF_TOKEN)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
-base_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, quantization_config=bnb,
-                                                   device_map="auto", token=HF_TOKEN)
-model = PeftModel.from_pretrained(base_model, ADAPTER_REPO, token=HF_TOKEN)
-model.eval()
-print("Adapter loaded.")
 
-tr = run_evaluation(model, tokenizer, TEST_QUESTIONS)
-tm = compute_metrics(tr)
+base_model = AutoModelForCausalLM.from_pretrained(
+    MODEL_NAME, quantization_config=bnb, device_map="auto", token=HF_TOKEN)
+base_model.eval()
+print(f"VRAM used: {torch.cuda.memory_allocated()/1e9:.2f} GB")
 
-with open("/kaggle/working/trained_results_v3.json", "w") as f:
-    json.dump({"metrics": tm, "results": tr}, f, indent=2)
+# ════════════════════════════════════════════════════════════
+# STEP 2 — Baseline eval (raw base model, no adapter)
+# ════════════════════════════════════════════════════════════
+base_results = run_evaluation(base_model, tokenizer, "BASELINE")
+base_metrics = compute_metrics(base_results)
+with open(f"{OUT_DIR}/baseline_results_v3.json", "w") as f:
+    json.dump({"metrics": base_metrics, "results": base_results}, f, indent=2)
+print(f"\nBaseline → Acc={base_metrics['accuracy']*100:.1f}%  "
+      f"ECE={base_metrics['ece']:.4f}  AvgConf={base_metrics['avg_confidence']*100:.1f}%  "
+      f"Overconf={base_metrics['overconfidence_rate']*100:.1f}%")
 
-# ── Domain breakdown ──────────────────────────────────────────
+# ════════════════════════════════════════════════════════════
+# STEP 3 — Apply LoRA adapter ON TOP (no model reload!)
+# ════════════════════════════════════════════════════════════
+print(f"\nApplying LoRA adapter from {ADAPTER_REPO} ...")
+trained_model = PeftModel.from_pretrained(base_model, ADAPTER_REPO, token=HF_TOKEN)
+trained_model.eval()
+print(f"Adapter applied. VRAM used: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+
+# ════════════════════════════════════════════════════════════
+# STEP 4 — Trained eval (same base + adapter)
+# ════════════════════════════════════════════════════════════
+trained_results = run_evaluation(trained_model, tokenizer, "TRAINED")
+trained_metrics = compute_metrics(trained_results)
+with open(f"{OUT_DIR}/trained_results_v3.json", "w") as f:
+    json.dump({"metrics": trained_metrics, "results": trained_results}, f, indent=2)
+print(f"\nTrained  → Acc={trained_metrics['accuracy']*100:.1f}%  "
+      f"ECE={trained_metrics['ece']:.4f}  AvgConf={trained_metrics['avg_confidence']*100:.1f}%  "
+      f"Overconf={trained_metrics['overconfidence_rate']*100:.1f}%")
+
+bm, tm = base_metrics, trained_metrics
+br, tr = base_results, trained_results
 b_domain = domain_breakdown(br)
 t_domain = domain_breakdown(tr)
 
+# ════════════════════════════════════════════════════════════
+# STEP 5 — Print final table
+# ════════════════════════════════════════════════════════════
 print(f"\n{'='*68}")
-print(f"  FINAL RESULTS — v3 HARD SET (Real Measurements)")
+print(f"  FINAL RESULTS — v3 Hard Set (40Q, 5 failure modes)")
 print(f"{'='*68}")
 print(f"  {'Metric':<28} {'Baseline':>10} {'Trained':>10} {'Δ':>12}")
 print(f"  {'-'*62}")
-print(f"  {'Accuracy':<28} {bm['accuracy']*100:>9.1f}% {tm['accuracy']*100:>9.1f}% {(tm['accuracy']-bm['accuracy'])*100:>+10.1f}%")
-print(f"  {'ECE (↓ better)':<28} {bm['ece']:>10.4f} {tm['ece']:>10.4f} {tm['ece']-bm['ece']:>+12.4f}")
-print(f"  {'Avg Confidence':<28} {bm['avg_confidence']*100:>9.1f}% {tm['avg_confidence']*100:>9.1f}% {(tm['avg_confidence']-bm['avg_confidence'])*100:>+10.1f}%")
-print(f"  {'Overconfidence Rate':<28} {bm['overconfidence_rate']*100:>9.1f}% {tm['overconfidence_rate']*100:>9.1f}% {(tm['overconfidence_rate']-bm['overconfidence_rate'])*100:>+10.1f}%")
+acc_d  = (tm['accuracy']            - bm['accuracy'])            * 100
+ece_d  =  tm['ece']                 - bm['ece']
+conf_d = (tm['avg_confidence']      - bm['avg_confidence'])      * 100
+oc_d   = (tm['overconfidence_rate'] - bm['overconfidence_rate']) * 100
+print(f"  {'Accuracy':<28} {bm['accuracy']*100:>9.1f}% {tm['accuracy']*100:>9.1f}% {acc_d:>+10.1f}%")
+print(f"  {'ECE (↓ better)':<28} {bm['ece']:>10.4f} {tm['ece']:>10.4f} {ece_d:>+12.4f}")
+print(f"  {'Avg Confidence':<28} {bm['avg_confidence']*100:>9.1f}% {tm['avg_confidence']*100:>9.1f}% {conf_d:>+10.1f}%")
+print(f"  {'Overconfidence Rate':<28} {bm['overconfidence_rate']*100:>9.1f}% {tm['overconfidence_rate']*100:>9.1f}% {oc_d:>+10.1f}%")
 print(f"{'='*68}")
 print(f"\n  Domain breakdown:")
 for d in sorted(b_domain.keys()):
-    ba, ta = b_domain[d]['accuracy'], t_domain[d]['accuracy']
-    be, te = b_domain[d]['ece'],      t_domain[d]['ece']
-    print(f"  {d:<22}  acc {ba*100:.0f}%→{ta*100:.0f}%  ECE {be:.3f}→{te:.3f}")
+    ba = b_domain[d]['accuracy']*100; ta = t_domain[d]['accuracy']*100
+    be = b_domain[d]['ece'];          te = t_domain[d]['ece']
+    print(f"  {d:<22}  acc {ba:.0f}% → {ta:.0f}%   ECE {be:.3f} → {te:.3f}")
 
-# ── Generate plot ─────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════
+# STEP 6 — Generate plot
+# ════════════════════════════════════════════════════════════
 BG, TEXT   = '#0d0d18', '#e8e8f0'
 GREEN, RED = '#00c853', '#ff5252'
 ORANGE     = '#ffab40'
-BLUE       = '#40c4ff'
 
 def style_ax(ax):
     ax.set_facecolor(BG); ax.tick_params(colors=TEXT)
@@ -290,9 +315,10 @@ def style_ax(ax):
 
 fig, axes = plt.subplots(2, 3, figsize=(17, 9), facecolor=BG)
 fig.suptitle(
-    'ECHO — Baseline vs GRPO-Trained  |  Qwen2.5-7B  |  751 Steps  |  Hard Calibration Set (40Q, 5 failure modes)',
+    'ECHO — Baseline vs GRPO-Trained  |  Qwen2.5-7B  |  751 Steps  |  40Q Hard Set (5 Calibration Failure Modes)',
     color=TEXT, fontsize=11, fontweight='bold', y=0.99)
-for ax in axes.flat: style_ax(ax)
+for ax in axes.flat:
+    style_ax(ax)
 
 # Panel 1: Overall metrics
 ax = axes[0, 0]
@@ -306,90 +332,88 @@ ax.barh(y-h/2, tv, height=h, color=GREEN, alpha=0.85, label='ECHO Trained')
 for i,(b,t,good) in enumerate(zip(bv,tv,hb)):
     pct = (t-b)/b*100 if good else (b-t)/b*100
     col = GREEN if pct > 0 else RED
-    ax.text(max(b,t)+0.2, y[i], f'{pct:+.1f}%', va='center', color=col, fontsize=9, fontweight='bold')
+    ax.text(max(b,t)+0.3, y[i], f'{pct:+.1f}%', va='center', color=col, fontsize=9, fontweight='bold')
 ax.set_yticks(y); ax.set_yticklabels(labels, color=TEXT, fontsize=9)
 ax.set_title('Overall Calibration Metrics', color=TEXT, fontsize=10)
 ax.legend(facecolor='#1a1a2e', edgecolor='#333355', labelcolor=TEXT, fontsize=8.5, loc='lower right')
-ax.set_xlim(0, max(max(bv),max(tv))*1.35)
-axes[1,0].set_visible(False)
+ax.set_xlim(0, max(max(bv), max(tv)) * 1.35)
+axes[1, 0].set_visible(False)
 
-# Panel 2 & 3: Reliability diagrams
-def rel_curve(results):
+# Reliability diagrams
+def rel_bars(results):
     confs   = np.array([r['confidence']/100.0 for r in results])
     correct = np.array([1.0 if r['correct'] else 0.0 for r in results])
-    centers, accs, cnts = [], [], []
+    cs, acs, ns = [], [], []
     for lo in np.linspace(0, 0.9, 10):
-        mask = (confs>=lo)&(confs<lo+0.1)
-        if mask.sum()>0:
-            centers.append(float(confs[mask].mean()))
-            accs.append(float(correct[mask].mean()))
-            cnts.append(int(mask.sum()))
-    return centers, accs, cnts
+        mask = (confs >= lo) & (confs < lo + 0.1)
+        if mask.sum() > 0:
+            cs.append(float(confs[mask].mean()))
+            acs.append(float(correct[mask].mean()))
+            ns.append(int(mask.sum()))
+    return cs, acs, ns
 
-for ax, results, color, title, metrics in [
-    (axes[0,1], br, RED,   f'Baseline  ECE={bm["ece"]:.4f}  Acc={bm["accuracy"]*100:.1f}%', bm),
-    (axes[0,2], tr, GREEN, f'ECHO Trained  ECE={tm["ece"]:.4f}  Acc={tm["accuracy"]*100:.1f}%', tm),
+for ax, results, color, label, metrics in [
+    (axes[0,1], br, RED,   f'Baseline  ECE={bm["ece"]:.4f}', bm),
+    (axes[0,2], tr, GREEN, f'Trained   ECE={tm["ece"]:.4f}', tm),
 ]:
-    c, a, cnt = rel_curve(results)
-    ax.plot([0,1],[0,1],'--',color='white',alpha=0.4,lw=1.5)
-    ax.bar(c, a, width=0.08, color=color, alpha=0.78)
-    for x,y_,n in zip(c,a,cnt):
-        ax.text(x, min(y_+0.03,0.97), str(n), ha='center', color=TEXT, fontsize=7)
-    ax.set_xlabel('Confidence',color=TEXT); ax.set_ylabel('Accuracy',color=TEXT)
-    ax.set_title(f'Reliability Diagram\n{title}', color=TEXT, fontsize=10)
+    c, a, n = rel_bars(results)
+    ax.plot([0,1],[0,1],'--',color='white',alpha=0.4,lw=1.5,label='Perfect')
+    ax.bar(c, a, width=0.08, color=color, alpha=0.78, label=label)
+    for x, y_, cnt in zip(c, a, n):
+        ax.text(x, min(y_+0.03, 0.97), str(cnt), ha='center', color=TEXT, fontsize=7)
+    ax.set_xlabel('Confidence', color=TEXT); ax.set_ylabel('Accuracy', color=TEXT)
+    ax.set_title(f'Reliability Diagram\n{label}  Acc={metrics["accuracy"]*100:.1f}%', color=TEXT, fontsize=10)
+    ax.legend(facecolor='#1a1a2e', edgecolor='#333355', labelcolor=TEXT, fontsize=8)
     ax.set_xlim(0,1); ax.set_ylim(0,1.05)
 
-# Panel 4: Domain accuracy comparison
-ax = axes[1,1]
+# Domain accuracy
+ax = axes[1, 1]
 domains = sorted(b_domain.keys())
 x = np.arange(len(domains)); h = 0.32
-ba_vals = [b_domain[d]['accuracy']*100 for d in domains]
-ta_vals = [t_domain[d]['accuracy']*100 for d in domains]
-ax.barh(x+h/2, ba_vals, height=h, color=RED,   alpha=0.85, label='Baseline')
-ax.barh(x-h/2, ta_vals, height=h, color=GREEN, alpha=0.85, label='ECHO Trained')
-ax.set_yticks(x)
-ax.set_yticklabels([d.replace('_',' ') for d in domains], color=TEXT, fontsize=8)
+ax.barh(x+h/2, [b_domain[d]['accuracy']*100 for d in domains], height=h, color=RED,   alpha=0.85, label='Baseline')
+ax.barh(x-h/2, [t_domain[d]['accuracy']*100 for d in domains], height=h, color=GREEN, alpha=0.85, label='Trained')
+ax.set_yticks(x); ax.set_yticklabels([d.replace('_',' ') for d in domains], color=TEXT, fontsize=8.5)
 ax.set_xlabel('Accuracy (%)', color=TEXT)
-ax.set_title('Accuracy by Domain / Failure Mode', color=TEXT, fontsize=10)
-ax.legend(facecolor='#1a1a2e', edgecolor='#333355', labelcolor=TEXT, fontsize=8)
-ax.set_xlim(0, 115)
+ax.set_title('Accuracy by Failure Mode', color=TEXT, fontsize=10)
+ax.legend(facecolor='#1a1a2e', edgecolor='#333355', labelcolor=TEXT, fontsize=8.5)
+ax.set_xlim(0, 120)
 
-# Panel 5: Summary
-ax = axes[1,2]; ax.set_xlim(0,1); ax.set_ylim(0,1); ax.axis('off')
+# Summary
+ax = axes[1, 2]; ax.set_xlim(0,1); ax.set_ylim(0,1); ax.axis('off')
 ax.set_title('Summary', color=TEXT, fontsize=10)
-ece_pct  = (bm['ece']-tm['ece'])/bm['ece']*100 if bm['ece']>0 else 0
-acc_gain = (tm['accuracy']-bm['accuracy'])*100
-oc_drop  = (bm['overconfidence_rate']-tm['overconfidence_rate'])/max(bm['overconfidence_rate'],1e-6)*100
+ece_pct = (bm['ece']-tm['ece'])/bm['ece']*100 if bm['ece'] > 0 else 0
 rows = [
-    ('Model',         'Qwen2.5-7B-Instruct'),
-    ('Method',        'GRPO + LoRA (4-bit)'),
-    ('Training Steps','751'),
-    ('Final Reward',  '0.750  (start: 0.150)'),
-    ('Test Set',      '40Q, 5 calibration modes'),
-    ('ECE Δ',         f'{ece_pct:+.1f}%'),
-    ('Accuracy Δ',    f'{acc_gain:+.1f}%'),
-    ('Overconf Δ',    f'{oc_drop:+.1f}%'),
+    ('Model',          'Qwen2.5-7B-Instruct'),
+    ('Method',         'GRPO + LoRA (4-bit)'),
+    ('Training Steps', '751'),
+    ('Final Reward',   '0.750  (start: 0.150)'),
+    ('Test Set',       '40Q, 5 calibration modes'),
+    ('ECE Δ',          f'{ece_pct:+.1f}%'),
+    ('Accuracy Δ',     f'{acc_d:+.1f}%'),
+    ('Overconf Δ',     f'{oc_d:+.1f}%'),
 ]
 for i,(k,v) in enumerate(rows):
-    yp = 0.90-i*0.105
-    ax.text(0.02,yp,f'{k}:',color=ORANGE,fontsize=8.5,fontweight='bold',va='top')
-    ax.text(0.46,yp,v,      color=TEXT,  fontsize=8.5,va='top')
+    yp = 0.90 - i*0.105
+    ax.text(0.02, yp, f'{k}:', color=ORANGE, fontsize=8.5, fontweight='bold', va='top')
+    ax.text(0.46, yp, v,       color=TEXT,   fontsize=8.5, va='top')
 
 plt.tight_layout(rect=[0,0,1,0.97])
-PLOT = '/kaggle/working/baseline_vs_trained_v3.png'
+PLOT = f"{OUT_DIR}/baseline_vs_trained_v3.png"
 fig.savefig(PLOT, dpi=150, bbox_inches='tight', facecolor=BG, edgecolor='none')
 plt.close(fig)
 print(f'\nPlot saved: {PLOT}')
 
-# ── Upload to Hub ─────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════
+# STEP 7 — Upload to Hub
+# ════════════════════════════════════════════════════════════
 print('Uploading to Hub...')
 api = HfApi(token=HF_TOKEN)
 ops = [
-    CommitOperationAdd('baseline_vs_trained.png',        PLOT),
-    CommitOperationAdd('baseline_results_v3.json',       '/kaggle/working/baseline_results_v3.json'),
-    CommitOperationAdd('trained_results_v3.json',        '/kaggle/working/trained_results_v3.json'),
+    CommitOperationAdd('baseline_vs_trained.png',      PLOT),
+    CommitOperationAdd('baseline_results_v3.json',     f"{OUT_DIR}/baseline_results_v3.json"),
+    CommitOperationAdd('trained_results_v3.json',      f"{OUT_DIR}/trained_results_v3.json"),
 ]
 r = api.create_commit(repo_id=ADAPTER_REPO, repo_type='model', operations=ops,
-    commit_message='v3 eval: hard 40Q calibration set, 5 failure modes, tolerance scoring')
+    commit_message='v3 eval: 40Q hard set, 5 failure modes, single-load no OOM')
 print('Uploaded:', r)
-print('\nAll done!')
+print('\n✓ All done!')
