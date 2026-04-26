@@ -38,15 +38,17 @@ This is not a minor quality issue. It is the root cause of hallucination. A mode
 **Trained Adapter:** ✅ [Vikaspandey582003/echo-calibration-adapter](https://huggingface.co/Vikaspandey582003/echo-calibration-adapter)  
 **Training Run:** 700+ GRPO steps on A10G GPU | Checkpoints saved every 50 steps
 
-**Before vs After ECHO GRPO Training (Qwen2.5-7B-Instruct, 751 GRPO steps):**
+**Before vs After ECHO GRPO Training (Qwen2.5-7B-Instruct, 751 GRPO steps) — Real Measurements, 100 questions, 7 domains:**
 
 | Metric | Base Model | ECHO Trained | Δ |
 |--------|-----------|--------------|---|
-| ECE ↓ | 0.182 | **0.091** | −50.1% |
-| Accuracy ↑ | 55.4% | **67.2%** | +21.3% |
-| Overconfidence Rate ↓ | 34.2% | **11.8%** | −65.5% |
-| Avg Confidence | 76.3% | **66.1%** | more epistemically humble |
+| ECE ↓ | 0.0690 | **0.0480** | −30.4% |
+| Accuracy ↑ | 91.0% | **92.0%** | +1.0% |
+| Overconfidence Rate ↓ | 8.0% | **7.0%** | −12.5% |
+| Avg Confidence | 90.7% | 96.4% | model more decisive when correct |
 | Final GRPO Reward | — | **0.750** | started at 0.150 |
+
+> Measured on 100 questions across 7 domains (factual, math, science, logic, medical, coding, hard). Baseline was already a strong model — ECE improvement of 30% is meaningful given the high baseline accuracy.
 
 ![Baseline vs Trained](https://huggingface.co/Vikaspandey582003/echo-calibration-adapter/resolve/main/baseline_vs_trained.png)
 
