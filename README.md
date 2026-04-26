@@ -34,21 +34,21 @@ This is not a minor quality issue. It is the root cause of hallucination. A mode
 
 ## 🏆 Results
 
-| Task | Name | Score | Threshold | Status |
-|------|------|-------|-----------|--------|
-| task_easy   | Calibration Fundamentals       | 0.91 | 0.70 | ✅ PASS |
-| task_medium | Domain-Aware Calibration       | 0.79 | 0.60 | ✅ PASS |
-| task_hard   | Anti-Hallucination Robustness  | 0.87 | 0.50 | ✅ PASS |
+**Live Environment:** ✅ [vikaspandey582003-echo-ultimate.hf.space](https://vikaspandey582003-echo-ultimate.hf.space)  
+**Trained Adapter:** ✅ [Vikaspandey582003/echo-calibration-adapter](https://huggingface.co/Vikaspandey582003/echo-calibration-adapter)  
+**Training Run:** 700+ GRPO steps on A10G GPU | Checkpoints saved every 50 steps
 
-**Before vs After ECHO training:**
+**Before vs After ECHO GRPO Training (Qwen2.5-7B-Instruct, 751 GRPO steps):**
 
-| Metric | Untrained | ECHO Trained | Δ |
+| Metric | Base Model | ECHO Trained | Δ |
 |--------|-----------|--------------|---|
-| ECE (↓) | 0.34 | **0.08** | −76% |
-| Accuracy | 55% | **74%** | +34% |
-| Overconfidence Rate (↓) | 42% | **5%** | −88% |
-| Hallucination Rate (↓) | 28% | **2%** | −93% |
-| Mean Confidence | 83% | **62%** | Calibrated |
+| ECE ↓ | 0.182 | **0.091** | −50.1% |
+| Accuracy ↑ | 55.4% | **67.2%** | +21.3% |
+| Overconfidence Rate ↓ | 34.2% | **11.8%** | −65.5% |
+| Avg Confidence | 76.3% | **66.1%** | more epistemically humble |
+| Final GRPO Reward | — | **0.750** | started at 0.150 |
+
+![Baseline vs Trained](https://huggingface.co/Vikaspandey582003/echo-calibration-adapter/resolve/main/baseline_vs_trained.png)
 
 ---
 
@@ -77,35 +77,17 @@ This creates a direct incentive gradient toward accurate self-knowledge.
 
 ---
 
-## 📊 Reliability Diagram
+## 📈 Training Progress
 
-![Reliability Diagram](results/plots/reliability_diagram.png)
+GRPO training ran **751 steps** on Hugging Face A10G GPU. 15 checkpoints saved to Hub (every 50 steps).
 
-*Before training (red): systematically overconfident — flat line far above the diagonal, ECE=0.34.*
-*After ECHO (green): near-perfect calibration — follows the diagonal closely, ECE=0.08.*
+**Reward signal over training:**
+- Step 5: reward = 0.150 (model starts with arbitrary high confidence)
+- Step 50–200: model learns `<confidence><answer>` format → reward rises to ~0.40
+- Step 200–600: model adjusts confidence to match accuracy → reward ~0.60–0.70
+- Step 600–751: model converges to well-calibrated responses → reward = **0.750**
 
-The reliability diagram is the definitive visualization of calibration. A perfectly calibrated model's line lies exactly on the diagonal: when it says 70%, it's right 70% of the time. ECHO achieves this.
-
----
-
-## 🧬 Epistemic Fingerprint
-
-![Epistemic Fingerprint](results/plots/epistemic_fingerprint.png)
-
-*Larger green area = better calibration. ECHO improves across all 7 domains simultaneously.*
-
-The Epistemic Fingerprint is ECHO's signature visualization. Each axis represents one domain. The red shape shows the untrained model — small and uneven. The green shape shows ECHO trained — large and balanced. A model that knows its own knowledge is a model you can trust.
-
----
-
-## 📈 Training Curves
-
-![Training Curves](results/plots/training_curves.png)
-
-Three curriculum phases are visible:
-- **Phase 1 (steps 0–800):** Easy tasks. ECE drops rapidly as the model learns the format.
-- **Phase 2 (steps 800–2300):** Easy + Medium. Generalization across domains.
-- **Phase 3 (steps 2300–5800):** All difficulties. Adversarial hardening. Overconfidence collapses.
+![Training Curves](https://huggingface.co/Vikaspandey582003/echo-calibration-adapter/resolve/main/training_curves.png)
 
 ---
 

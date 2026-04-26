@@ -155,16 +155,56 @@ def train(
             tokenizer.pad_token = tokenizer.eos_token
         logger.info("Unsloth: 4-bit model + LoRA adapter ready (2-3x faster, 70%% less VRAM)")
     else:
+        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
+
+        available_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        use_4bit = available_vram_gb < 40  # 4-bit on A10G (22GB), bf16 on A100 (80GB)
+        logger.info("GPU VRAM: %.1f GB — using %s", available_vram_gb, "4-bit NF4" if use_4bit else "bf16")
+
+        if use_4bit:
+            from transformers import BitsAndBytesConfig
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+            )
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                quantization_config=bnb_config,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+            model.enable_input_require_grads()
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            model.enable_input_require_grads()
+
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=16,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                            "gate_proj", "up_proj", "down_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
         )
-        logger.info("Standard transformers model loaded (full precision)")
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+        logger.info(
+            "%s model + LoRA ready (%.1f GB VRAM available)",
+            "4-bit" if use_4bit else "bf16", available_vram_gb
+        )
 
     curriculum  = CurriculumManager()
     reward_fn   = build_reward_function(task_bank)
@@ -177,27 +217,84 @@ def train(
         tokenizer=tokenizer,
     )
 
+    import os
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
     grpo_config = GRPOConfig(
         output_dir=output_dir,
         learning_rate=cfg.LEARNING_RATE,
-        per_device_train_batch_size=cfg.BATCH_SIZE,
-        gradient_accumulation_steps=cfg.GRAD_ACCUMULATION,
+        per_device_train_batch_size=1,          # must be 1 for 7B full-precision on A10G
+        gradient_accumulation_steps=8,           # effective batch = 8
         num_train_epochs=cfg.NUM_EPOCHS,
-        num_generations=cfg.NUM_GENERATIONS,
-        max_new_tokens=cfg.MAX_NEW_TOKENS,
-        temperature=cfg.TEMPERATURE,
-        top_p=cfg.TOP_P,
-        kl_coef=cfg.KL_COEFF,
-        logging_steps=cfg.LOG_STEPS,
-        save_steps=cfg.SAVE_STEPS,
-        warmup_steps=cfg.WARMUP_STEPS,
-        max_steps=total_steps,
+        num_generations=4,                       # GRPO group size
+        max_completion_length=256,               # longer completions = better reasoning
+        logging_steps=5,
+        save_steps=50,
+        warmup_steps=20,
+        max_steps=600,                           # 600 steps for solid calibration learning
         report_to="wandb" if wandb_available else "none",
         run_name="echo-ultimate",
         remove_unused_columns=False,
+        bf16=True,
+        gradient_checkpointing=True,             # trade compute for VRAM — essential for 7B
     )
 
+    hf_token = os.environ.get("HF_TOKEN", "")
+    adapter_repo = os.environ.get("ADAPTER_REPO", "Vikaspandey582003/echo-calibration-adapter")
+
+    # Check if a checkpoint already exists on Hub to resume from
+    resume_from_checkpoint = None
+    if hf_token:
+        try:
+            from huggingface_hub import HfApi, hf_hub_download
+            api = HfApi(token=hf_token)
+            try:
+                api.hf_hub_download = hf_hub_download
+                refs = api.list_repo_files(adapter_repo, repo_type="model", token=hf_token)
+                checkpoint_dirs = [f for f in refs if f.startswith("checkpoint-")]
+                if checkpoint_dirs:
+                    latest = sorted(checkpoint_dirs, key=lambda x: int(x.split("-")[-1].split("/")[0]))[-1]
+                    step = int(latest.split("-")[1].split("/")[0])
+                    logger.info("Found Hub checkpoint at step %d — will resume", step)
+                    # Download checkpoint folder locally
+                    import subprocess
+                    subprocess.run([
+                        "python3", "-c",
+                        f"from huggingface_hub import snapshot_download; "
+                        f"snapshot_download('{adapter_repo}', local_dir='/tmp/resume_ckpt', token='{hf_token}', repo_type='model')"
+                    ], check=False)
+                    resume_from_checkpoint = f"/tmp/resume_ckpt/checkpoint-{step}"
+                    logger.info("Resuming from checkpoint: %s", resume_from_checkpoint)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning("Could not check Hub for checkpoint: %s", e)
+
     class EchoCallback(TrainerCallback):
+        def on_save(self, args, state, control, **kwargs):
+            """Push checkpoint to Hub after every save so we can resume if Space crashes."""
+            if not hf_token or not state.global_step:
+                return
+            step = state.global_step
+            ckpt_path = os.path.join(args.output_dir, f"checkpoint-{step}")
+            if not os.path.exists(ckpt_path):
+                return
+            try:
+                from huggingface_hub import HfApi
+                api = HfApi(token=hf_token)
+                api.create_repo(adapter_repo, repo_type="model", exist_ok=True, token=hf_token)
+                api.upload_folder(
+                    folder_path=ckpt_path,
+                    repo_id=adapter_repo,
+                    path_in_repo=f"checkpoint-{step}",
+                    repo_type="model",
+                    commit_message=f"checkpoint step {step}",
+                    token=hf_token,
+                )
+                logger.info("Checkpoint step %d pushed to Hub — safe to crash and resume", step)
+            except Exception as e:
+                logger.warning("Hub checkpoint push failed at step %d: %s", step, e)
+
         def on_log(self, args, state, control, logs=None, **kwargs):
             if not logs:
                 return
@@ -252,7 +349,7 @@ def train(
         processing_class=tokenizer,
     )
     trainer.add_callback(EchoCallback())
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     trainer.save_model(output_dir)
     tokenizer.save_pretrained(output_dir)
@@ -271,9 +368,7 @@ def train(
         except Exception as exc:
             logger.error("Phase 4 skipped: %s", exc)
 
-    # Auto-push adapter to HF Hub
-    hf_token = os.environ.get("HF_TOKEN", "")
-    adapter_repo = os.environ.get("ADAPTER_REPO", "Vikaspandey582003/echo-calibration-adapter")
+    # Auto-push final adapter to HF Hub
     if hf_token:
         try:
             from huggingface_hub import HfApi
@@ -291,6 +386,23 @@ def train(
             logger.error("HF Hub push failed: %s", exc)
     else:
         print("⚠️  HF_TOKEN not set — adapter not pushed to Hub. Set HF_TOKEN env var.")
+
+    # Push training log CSV to Hub so it's accessible for analysis
+    if hf_token and os.path.exists(cfg.TRAINING_LOG):
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi(token=hf_token)
+            api.upload_file(
+                path_or_fileobj=cfg.TRAINING_LOG,
+                path_in_repo="training_log.csv",
+                repo_id=adapter_repo,
+                repo_type="model",
+                commit_message="training log — reward/ECE over all steps",
+                token=hf_token,
+            )
+            print(f"✅  Training log pushed to https://huggingface.co/{adapter_repo}/blob/main/training_log.csv")
+        except Exception as exc:
+            logger.error("Training log push failed: %s", exc)
 
     print(f"\n✅  Training complete. Model saved to {output_dir}")
 
